@@ -1,165 +1,118 @@
-import sqlite3
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-import asyncio
+import telebot
+from telebot import types
+import json
+import os
 
-BOT_TOKEN = "8438924529:AAGKzTN-Rplj9BFrfFQCJZXHcK_JtmxzxfU"
-ADMIN_ID = 1369798535  # ваш telegram id
+# ==============================
+# CONFIG
+# ==============================
+ADMIN_ID = 1369798535
+BOT_TOKEN = "8438924529:AAGKzTN-Rplj9BFrfFQCJZXHcK_JtmxzxfU"  # токен в коде как ты просил
 
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# === DATABASE SETUP ===
+# ==============================
+# DATABASE
+# ==============================
+DB_FILE = "db.json"
 
-def init_db():
-    conn = sqlite3.connect("dodep_bank.db")
-    cur = conn.cursor()
+def load_db():
+    if not os.path.exists(DB_FILE):
+        return {}
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER UNIQUE,
-        name TEXT
-    )""")
+def save_db(data):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS loans (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        amount INTEGER,
-        status TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
+# ==============================
+# START
+# ==============================
+@bot.message_handler(commands=["start"])
+def start(message):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("Попросить долг", "Посмотреть долг")
+    bot.send_message(message.chat.id, "Добро пожаловать в ООО «Додеп банк» 💸", reply_markup=kb)
 
-    conn.commit()
-    conn.close()
+# ==============================
+# REQUEST LOAN
+# ==============================
+@bot.message_handler(func=lambda m: m.text == "Попросить долг")
+def request_loan(message):
+    msg = bot.send_message(message.chat.id, "Введите сумму долга:")
+    bot.register_next_step_handler(msg, ask_reason)
 
-init_db()
+def ask_reason(message):
+    amount = message.text
 
-def get_user_id(telegram_id, name):
-    conn = sqlite3.connect("dodep_bank.db")
-    cur = conn.cursor()
+    if not amount.isdigit():
+        return bot.send_message(message.chat.id, "Введите число!")
 
-    cur.execute("SELECT id FROM users WHERE telegram_id=?", (telegram_id,))
-    row = cur.fetchone()
+    message.chat.amount = int(amount)
+    msg = bot.send_message(message.chat.id, "Введите причину:")
+    bot.register_next_step_handler(msg, send_request)
 
-    if row:
-        return row[0]
+def send_request(message):
+    reason = message.text
+    amount = message.chat.amount
 
-    cur.execute("INSERT INTO users (telegram_id, name) VALUES (?,?)",
-                (telegram_id, name))
-    conn.commit()
-
-    return cur.lastrowid
-
-
-# === BOT HANDLERS ===
-
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    get_user_id(message.from_user.id, message.from_user.full_name)
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Попросить долг", callback_data="ask_loan")
-    kb.button(text="Мой долг", callback_data="my_loan")
-
-    await message.answer(
-        "Добро пожаловать в ООО «Додеп Банк» 💸\nВыберите действие:",
-        reply_markup=kb.as_markup()
+    bot.send_message(
+        ADMIN_ID,
+        f"📩 *Заявка на долг*\n"
+        f"От: @{message.from_user.username}\n"
+        f"ID: {message.from_user.id}\n"
+        f"Сумма: {amount}₽\n"
+        f"Причина: {reason}",
+        parse_mode="Markdown"
     )
 
-@dp.callback_query(F.data == "ask_loan")
-async def ask_loan(call: types.CallbackQuery):
-    await call.message.answer("Введите сумму, которую хотите занять:")
-    await call.answer()
+    bot.send_message(message.chat.id, "Заявка отправлена!")
 
-    @dp.message()
-    async def process_amount(message: types.Message):
-        try:
-            amount = int(message.text)
-        except:
-            await message.answer("Введите число!")
-            return
+# ==============================
+# CHECK LOAN
+# ==============================
+@bot.message_handler(func=lambda m: m.text == "Посмотреть долг")
+def check_loan(message):
+    db = load_db()
+    user_id = str(message.from_user.id)
 
-        user_id = get_user_id(message.from_user.id, message.from_user.full_name)
+    debt = db.get(user_id, 0)
 
-        conn = sqlite3.connect("dodep_bank.db")
-        cur = conn.cursor()
-        cur.execute("INSERT INTO loans (user_id, amount, status) VALUES (?,?,?)",
-                    (user_id, amount, "pending"))
-        conn.commit()
+    bot.send_message(message.chat.id, f"Ваш долг: {debt}₽")
 
-        loan_id = cur.lastrowid
-        conn.close()
-
-        await message.answer("Заявка отправлена!")
-
-        await bot.send_message(
-            ADMIN_ID,
-            f"💰 Новая заявка №{loan_id}\n"
-            f"Пользователь: {message.from_user.full_name}\n"
-            f"Сумма: {amount}\n\n"
-            f"/approve_{loan_id} — одобрить\n"
-            f"/reject_{loan_id} — отклонить"
-        )
-
-@dp.message()
-async def admin_commands(message: types.Message):
+# ==============================
+# ADMIN: EDIT DEBT
+# ==============================
+@bot.message_handler(commands=["edit"])
+def edit_debt(message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    if message.text.startswith("/approve_"):
-        loan_id = message.text.replace("/approve_", "")
-        update_loan_status(loan_id, "approved")
-        await message.answer(f"Заявка {loan_id} одобрена.")
+    msg = bot.send_message(message.chat.id, "Введите ID пользователя:")
+    bot.register_next_step_handler(msg, ask_new_debt)
 
-    if message.text.startswith("/reject_"):
-        loan_id = message.text.replace("/reject_", "")
-        update_loan_status(loan_id, "rejected")
-        await message.answer(f"Заявка {loan_id} отклонена.")
+def ask_new_debt(message):
+    user_id = message.text
+    message.chat.edit_user = user_id
 
-def update_loan_status(loan_id, status):
-    conn = sqlite3.connect("dodep_bank.db")
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE loans SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        (status, loan_id)
-    )
-    conn.commit()
-    conn.close()
+    msg = bot.send_message(message.chat.id, "Введите новый долг:")
+    bot.register_next_step_handler(msg, save_new_debt)
 
+def save_new_debt(message):
+    new_debt = message.text
 
-@dp.callback_query(F.data == "my_loan")
-async def my_loan(call: types.CallbackQuery):
-    user_id = get_user_id(call.from_user.id, call.from_user.full_name)
+    if not new_debt.isdigit():
+        return bot.send_message(message.chat.id, "Введите число!")
 
-    conn = sqlite3.connect("dodep_bank.db")
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT amount, status, created_at FROM loans WHERE user_id=? "
-        "ORDER BY id DESC LIMIT 1",
-        (user_id,)
-    )
-    row = cur.fetchone()
-    conn.close()
+    user_id = message.chat.edit_user
+    db = load_db()
+    db[user_id] = int(new_debt)
+    save_db(db)
 
-    if row:
-        amount, status, created = row
-        await call.message.answer(
-            f"💳 Ваш последний долг:\n"
-            f"Сумма: {amount} руб.\n"
-            f"Статус: {status}\n"
-            f"Дата: {created}"
-        )
-    else:
-        await call.message.answer("У вас нет долгов.")
+    bot.send_message(message.chat.id, "Долг обновлён.")
 
-    await call.answer()
-
-# === START BOT ===
-
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# ==============================
+# RUN
+# ==============================
+bot.polling(none_stop=True)
