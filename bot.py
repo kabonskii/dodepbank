@@ -1,7 +1,5 @@
 import telebot
 from telebot import types
-import json
-import os
 
 # ==============================
 # CONFIG
@@ -12,19 +10,9 @@ BOT_TOKEN = "8438924529:AAGKzTN-Rplj9BFrfFQCJZXHcK_JtmxzxfU"  # токен
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ==============================
-# DATABASE
+# DATABASE IN MEMORY
 # ==============================
-DB_FILE = "db.json"
-
-def load_db():
-    if not os.path.exists(DB_FILE):
-        return {}
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_db(data):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+db = {}  # хранение долгов в памяти
 
 # ==============================
 # START
@@ -34,6 +22,7 @@ def start(message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("Попросить долг", "Посмотреть долг")
     bot.send_message(message.chat.id, "Добро пожаловать в ООО «Додеп банк» 💸", reply_markup=kb)
+    bot.send_message(message.chat.id, f"Ваш ID: {message.from_user.id}")  # проверка ID
 
 # ==============================
 # REQUEST LOAN
@@ -55,11 +44,9 @@ def send_request(message):
     reason = message.text
     amount = message.chat.amount
 
-    # Сохраняем долг
-    db = load_db()
+    # Сохраняем долг в памяти
     user_id = str(message.from_user.id)
     db[user_id] = db.get(user_id, 0) + int(amount)
-    save_db(db)
 
     # Отправляем администратору
     username = message.from_user.username or message.from_user.first_name
@@ -80,7 +67,6 @@ def send_request(message):
 # ==============================
 @bot.message_handler(func=lambda m: m.text == "Посмотреть долг")
 def check_loan(message):
-    db = load_db()
     user_id = str(message.from_user.id)
     debt = db.get(user_id, 0)
     bot.send_message(message.chat.id, f"Ваш долг: {debt}₽")
@@ -91,7 +77,7 @@ def check_loan(message):
 @bot.message_handler(commands=["edit"])
 def edit_debt(message):
     if message.from_user.id != ADMIN_ID:
-        return
+        return bot.send_message(message.chat.id, "❌ У вас нет прав администратора")
     msg = bot.send_message(message.chat.id, "Введите ID пользователя:")
     bot.register_next_step_handler(msg, ask_new_debt)
 
@@ -106,10 +92,8 @@ def save_new_debt(message):
     if not new_debt.isdigit():
         return bot.send_message(message.chat.id, "Введите число!")
     user_id = message.chat.edit_user
-    db = load_db()
     db[user_id] = int(new_debt)
-    save_db(db)
-    bot.send_message(message.chat.id, "Долг обновлён.")
+    bot.send_message(message.chat.id, f"Долг пользователя {user_id} обновлён до {new_debt}₽")
 
 # ==============================
 # RUN
